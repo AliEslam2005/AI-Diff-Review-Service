@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal, Optional
 
 # --- Public Endpoints ---
@@ -26,3 +26,10 @@ class ReviewOptions(BaseModel):
 class ReviewRequest(BaseModel):
     diff: str
     options: Optional[ReviewOptions] = Field(default_factory=ReviewOptions)
+
+    @field_validator("diff")
+    @classmethod
+    def diff_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("diff must not be empty")
+        return v

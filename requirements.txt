@@ -42,7 +42,7 @@ google-auth==2.56.2
     #   google-generativeai
 google-auth-httplib2==0.4.0
     # via google-api-python-client
-google-generativeai==0.8.6
+google-genai==0.6.0
     # via ai-diff-review-service (pyproject.toml)
 googleapis-common-protos==1.75.0
     # via

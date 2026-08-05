@@ -120,6 +120,7 @@ async def worker_task():
 
             except Exception as e:
                 job["status"] = "failed"
+                job["error"] = {"code": "internal", "message": str(e)[:300]}
                 job["events"].append({"event": "status", "data": json.dumps("failed")})
                 
             finally:

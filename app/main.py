@@ -1,16 +1,25 @@
+import os
 import time
 import asyncio
 from collections import deque
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, Header
+from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
+from dotenv import load_dotenv
 
-from app.models.schemas import HealthResponse, SpecResponse, Limits, ReviewRequest
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi import Request
+
+from app.models.schemas import HealthResponse, SpecResponse, Limits, ReviewRequest, ReviewOptions
 from app.services.jobs import create_job, worker_task, JOBS_DB
 
+# Load environment variables from .env
+load_dotenv()
+
 START_TIME = time.time()
-SERVICE_TOKEN = "my-test-token"
+SERVICE_TOKEN = os.getenv("SERVICE_TOKEN", "my-test-token")
 
 # In-memory rate limiter tracker
 RATE_LIMIT_DB = deque()
@@ -28,12 +37,34 @@ app = FastAPI(title="AI Diff Review Service", lifespan=lifespan)
 def verify_token(authorization: str = Header(None)):
     expected_header = f"Bearer {SERVICE_TOKEN}"
     if not authorization or authorization != expected_header:
-        return JSONResponse(
+        raise HTTPException(
             status_code=401,
-            content={"error": {"code": "unauthorized", "message": "Missing or invalid token"}}
+            detail={"error": {"code": "unauthorized", "message": "Missing or invalid token"}}
         )
     return authorization
 
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    # Pass through our custom error envelopes, otherwise wrap standard HTTP errors
+    if isinstance(exc.detail, dict) and "error" in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code, 
+        content={"error": {"code": "internal", "message": str(exc.detail)}}
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Differentiate between bad JSON formatting and missing/empty fields
+    if any(e.get("type") == "json_invalid" for e in exc.errors()):
+        return JSONResponse(
+            status_code=400, 
+            content={"error": {"code": "invalid_json", "message": "Body is not valid JSON"}}
+        )
+    return JSONResponse(
+        status_code=422, 
+        content={"error": {"code": "invalid_diff", "message": "diff is missing, empty, or invalid"}}
+    )
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -52,11 +83,9 @@ async def get_spec():
 async def submit_review(
     request: ReviewRequest, 
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
-    token: str | JSONResponse = Depends(verify_token)
+    token: str = Depends(verify_token)
 ):
-    if isinstance(token, JSONResponse): return token
-    
-    # --- Rate Limiting Enforcement[cite: 2] ---
+    # --- Rate Limiting Enforcement ---
     now = time.time()
     while RATE_LIMIT_DB and RATE_LIMIT_DB[0] < now - 60:
         RATE_LIMIT_DB.popleft()
@@ -71,14 +100,15 @@ async def submit_review(
     RATE_LIMIT_DB.append(now)
     # -------------------------------------------
 
-    # Check payload size requirement[cite: 2]
+    # Check payload size requirement
     if len(request.diff.encode('utf-8')) > 1048576:
         return JSONResponse(
             status_code=413, 
             content={"error": {"code": "payload_too_large", "message": "Payload exceeds 1 MiB limit"}}
         )
     
-    job_id, status_code, error = create_job(request.diff, request.options.model_dump(), idempotency_key)
+    options_dict = request.options.model_dump() if request.options else ReviewOptions().model_dump()
+    job_id, status_code, error = create_job(request.diff, options_dict, idempotency_key)
     
     if error:
         return JSONResponse(status_code=status_code, content=error)
@@ -87,9 +117,7 @@ async def submit_review(
 
 
 @app.get("/v1/reviews/{job_id}")
-async def get_review_status(job_id: str, token: str | JSONResponse = Depends(verify_token)):
-    if isinstance(token, JSONResponse): return token
-    
+async def get_review_status(job_id: str, token: str = Depends(verify_token)):
     job = JOBS_DB.get(job_id)
     if not job:
         return JSONResponse(
@@ -97,18 +125,22 @@ async def get_review_status(job_id: str, token: str | JSONResponse = Depends(ver
             content={"error": {"code": "not_found", "message": "Job not found"}}
         )
         
-    return {
+    response = {
         "jobId": job["jobId"],
         "status": job["status"],
         "findings": job["findings"],
         "usage": job["usage"]
     }
 
+    # Surface the error detail if the job failed
+    if job["status"] == "failed" and "error" in job:
+        response["error"] = job["error"]
+
+    return response
+
 
 @app.get("/v1/reviews/{job_id}/stream")
-async def stream_review(job_id: str, token: str | JSONResponse = Depends(verify_token)):
-    if isinstance(token, JSONResponse): return token
-    
+async def stream_review(job_id: str, token: str = Depends(verify_token)):
     job = JOBS_DB.get(job_id)
     if not job:
         return JSONResponse(
