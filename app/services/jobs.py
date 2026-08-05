@@ -4,6 +4,7 @@ import json
 import uuid
 
 from app.providers.mock import scan_diff_with_mock
+from app.providers.llm import scan_diff_with_llm
 from app.services.chunking import chunk_diff
 
 # --- In-Memory State Stores ---
@@ -86,8 +87,12 @@ async def worker_task():
                 all_findings = []
                 if provider_type == "mock":
                     for chunk in chunks:
-                        # Process each chunk individually
                         chunk_findings = await asyncio.to_thread(scan_diff_with_mock, chunk)
+                        all_findings.extend(chunk_findings)
+                elif provider_type == "llm":
+                    for chunk in chunks:
+                        # Send each chunk to Gemini
+                        chunk_findings = await asyncio.to_thread(scan_diff_with_llm, chunk)
                         all_findings.extend(chunk_findings)
                 else:
                     all_findings = []
