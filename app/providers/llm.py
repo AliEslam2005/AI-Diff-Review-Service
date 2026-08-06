@@ -15,8 +15,7 @@ def get_genai_client():
 
 def generate_finding_id(path: str, line: int, rule_id: str) -> str:
     """Generates a deterministic ID to support the global deduplication rule."""
-    unique_string = f"{path}:{line}:{rule_id}"
-    return hashlib.md5(unique_string.encode("utf-8")).hexdigest()
+    return f"{rule_id}:{path}:{line}"
 
 
 def scan_diff_with_llm(diff_text: str) -> list[dict]:
